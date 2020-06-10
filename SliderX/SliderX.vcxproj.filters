@@ -21,15 +21,12 @@
     <ClCompile Include="..\MultiThread.cpp">
       <Filter>Resource Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\StableButton.cpp">
-      <Filter>Resource Files</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\MultiThread.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\StableButton.h">
+    <ClInclude Include="__vm\.SliderX.vsarduino.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

@@ -13,9 +13,11 @@
 
 #define COMMAND_PORT Serial
 
-#define MAX_SPEED 300
+#define MAX_SPEED 200
 #define DEFAULT_SPEED 30
 #define HOMING_SPEED (DEFAULT_SPEED / 2)
+
+#define MAX_POSITION 300
 
 #define STEP_PER_MM 240
 
@@ -31,8 +33,8 @@ float CurrentPosition;
 long DesireStepPosition;
 long CurrentStepPosition;
 
-bool PRESSED_LOGIC = LOW;
 bool isHoming = false;
+bool isMoving = false;
 bool blink = false;
 
 MultiThread LedBlinkScheduler;
@@ -108,6 +110,7 @@ void Home()
 	{
 		TurnOffTimer1;
 		isHoming = false;
+		isMoving = false;
 		DesireSpeed = DEFAULT_SPEED;
 		DesirePosition = 0;
 		CurrentPosition = 0;
@@ -135,10 +138,13 @@ void SliderExecute()
 	{
 		DesireSpeed = MAX_SPEED;
 	}
+
 	//position
+	if (DesirePosition > MAX_POSITION) DesirePosition = MAX_POSITION;
+
 	if (DesirePosition == CurrentPosition)
 		return;
-
+	isMoving = true;
 	DesireStepPosition = roundf(DesirePosition * STEP_PER_MM);
 
 	if (DesirePosition - CurrentPosition > 0)
@@ -186,18 +192,22 @@ ISR(TIMER1_COMPA_vect)
 	{
 		CurrentStepPosition--;
 	}
-	else
+	else if (isMoving)
 	{
 		CurrentPosition = DesirePosition;
-		TurnOffTimer1;
+		isMoving = false;
 		blink = false;
+		TurnOffTimer1;
 		COMMAND_PORT.println("Ok");
 		return;
 	}
 
-	digitalWrite(STEP_PIN, 0);
-	delayMicroseconds(2);
-	digitalWrite(STEP_PIN, 1);
+	if (isMoving)
+	{
+		digitalWrite(STEP_PIN, 0);
+		delayMicroseconds(2);
+		digitalWrite(STEP_PIN, 1);
+	}
 }
 
 void SerialExecute()
