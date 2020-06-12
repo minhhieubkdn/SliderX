@@ -19,7 +19,7 @@
 
 #define MAX_POSITION 300
 
-#define STEP_PER_MM 240
+#define STEP_PER_MM 120
 
 #define SPEED_TO_CYCLE(x) (1000000.0 / (STEP_PER_MM * x))
 
