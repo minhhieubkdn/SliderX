@@ -13,9 +13,11 @@
 
 #define COMMAND_PORT Serial
 
-#define MAX_SPEED 200
+#define DEFAULT_ACCELERATION 1000 // mm/s2
+
+#define MAX_SPEED 81 // mm/s
 #define DEFAULT_SPEED 30
-#define HOMING_SPEED (DEFAULT_SPEED / 2)
+#define HOMING_SPEED 20
 
 #define MAX_POSITION 300
 
@@ -28,11 +30,19 @@
 String inputString;
 bool stringComplete;
 float DesireSpeed;
+float OldSpeed;
+float LinearSpeed;
+float Accel;
 float DesirePosition;
 float CurrentPosition;
-long DesireStepPosition;
-long CurrentStepPosition;
+long DesireSteps;
+long PassedSteps;
+unsigned long PassedTime;
+long AccelSteps;
+float TempCycle;
+unsigned long CycleOffset;
 
+bool isEnding = false;
 bool isHoming = false;
 bool isMoving = false;
 bool blink = false;
@@ -51,6 +61,7 @@ void loop()
 {
 	Home();
 	SerialExecute();
+	CaculateTempCycle();
 	SliderExecute();
 	LedBlink();
 }
@@ -67,12 +78,13 @@ void IOInit()
 void setValue()
 {
 	COMMAND_PORT.println("Begin:");
-	DesireSpeed = DEFAULT_SPEED;
+	DesireSpeed = OldSpeed = DEFAULT_SPEED;
+	Accel = DEFAULT_ACCELERATION;
 
 	DesirePosition = 0;
 	CurrentPosition = 0;
-	DesireStepPosition = 0;
-	CurrentStepPosition = 0;
+	DesireSteps = 0;
+	PassedSteps = 0;
 }
 
 void TimerInit()
@@ -111,11 +123,11 @@ void Home()
 		TurnOffTimer1;
 		isHoming = false;
 		isMoving = false;
-		DesireSpeed = DEFAULT_SPEED;
 		DesirePosition = 0;
 		CurrentPosition = 0;
-		DesireStepPosition = 0;
-		CurrentStepPosition = 0;
+		DesireSteps = 0;
+		PassedSteps = 0;
+		AccelSteps = 0;
 		digitalWrite(EN_PIN, 0);
 		COMMAND_PORT.println("Ok");
 	}
@@ -123,6 +135,7 @@ void Home()
 
 void SliderExecute()
 {
+
 	//speed
 	if (DesireSpeed < 0.01 && DesireSpeed > -0.01)
 	{
@@ -144,19 +157,24 @@ void SliderExecute()
 
 	if (DesirePosition == CurrentPosition)
 		return;
+
 	isMoving = true;
-	DesireStepPosition = roundf(DesirePosition * STEP_PER_MM);
 
 	if (DesirePosition - CurrentPosition > 0)
 	{
 		digitalWrite(DIR_PIN, 1);
+		DesireSteps = roundf((DesirePosition - CurrentPosition) * STEP_PER_MM);
 	}
-	else if (DesirePosition - CurrentPosition < 0)
+	else
 	{
 		digitalWrite(DIR_PIN, 0);
+		DesireSteps = roundf((CurrentPosition - DesirePosition) * STEP_PER_MM);
 	}
 
-	setIntCycle(SPEED_TO_CYCLE(DesireSpeed));
+	FinishMoving();
+	TempCycle = SPEED_TO_CYCLE(LinearSpeed);
+	setIntCycle(TempCycle);
+
 	digitalWrite(EN_PIN, 0);
 	TurnOnTimer1;
 }
@@ -179,34 +197,67 @@ void setIntCycle(float intCycle)
 		prescaler = 1;
 	}
 
-	COMPARE_VALUE_TIMER = roundf(intCycle * F_CPU / (1000000.0 * prescaler)) - 1;
+	COMPARE_VALUE_TIMER = roundf(intCycle * 16 / prescaler) - 1;
+	//COMPARE_VALUE_TIMER = roundf(intCycle * F_CPU / (1000000.0 * prescaler)) - 1;
 }
 
 ISR(TIMER1_COMPA_vect)
 {
-	if (DesireStepPosition > CurrentStepPosition)
+	if (isMoving)
 	{
-		CurrentStepPosition++;
+		if (PassedSteps == DesireSteps) return;
+
+		digitalWrite(STEP_PIN, 0);
+		delayMicroseconds(3);
+		digitalWrite(STEP_PIN, 1);
+
+		PassedSteps++;
+		PassedTime += TempCycle;
+		if (LinearSpeed < DesireSpeed)
+			AccelSteps++;
 	}
-	else if (DesireStepPosition < CurrentStepPosition)
-	{
-		CurrentStepPosition--;
-	}
-	else if (isMoving)
+}
+
+void FinishMoving()
+{
+	if (isMoving && PassedSteps == DesireSteps)
 	{
 		CurrentPosition = DesirePosition;
+		AccelSteps = 0;
+		PassedTime = 0;
+		LinearSpeed = 0;
+		DesireSteps = 0;
+		PassedSteps = 0;
+		AccelSteps = 0;
 		isMoving = false;
+		isEnding = false;
 		blink = false;
 		TurnOffTimer1;
 		COMMAND_PORT.println("Ok");
+	}
+}
+
+void CaculateTempCycle()
+{
+	if (DesireSteps - PassedSteps < AccelSteps)
+	{
+		if (!isEnding) 
+		{
+			isEnding = true;
+			PassedTime = 0;
+			if (DesireSpeed > LinearSpeed) DesireSpeed = LinearSpeed;
+		}
+		LinearSpeed = DesireSpeed - Accel * PassedTime / 1000000;
 		return;
 	}
 
-	if (isMoving)
+	if (LinearSpeed < DesireSpeed)
 	{
-		digitalWrite(STEP_PIN, 0);
-		delayMicroseconds(2);
-		digitalWrite(STEP_PIN, 1);
+		LinearSpeed = DesireSpeed / 5 + Accel * PassedTime / 1000000;
+	}
+	else
+	{
+		LinearSpeed = DesireSpeed;
 	}
 }
 
@@ -227,12 +278,13 @@ void SerialExecute()
 
 	if (!stringComplete)
 		return;
-	String messageBuffer = inputString.substring(0, 4);
 
+	String messageBuffer = inputString.substring(0, 4);
 
 	if (messageBuffer == "M320")
 	{
 		isHoming = true;
+		//isMoving = true;
 		DesireSpeed = HOMING_SPEED;
 		DesirePosition = -1000;
 	}
@@ -240,13 +292,28 @@ void SerialExecute()
 	if (messageBuffer == "M321")
 	{
 		DesireSpeed = inputString.substring(5).toFloat();
+		OldSpeed = DesireSpeed;
 		COMMAND_PORT.println("Ok");
 	}
 
 	if (messageBuffer == "M322")
 	{
 		DesirePosition = inputString.substring(5).toFloat();
+
+		if (DesirePosition < 0) DesirePosition = 0;
+		if (DesirePosition == CurrentPosition)
+		{
+			COMMAND_PORT.println("Ok");
+		}
+		else
+		{
+			LinearSpeed = DesireSpeed / 5;
+			TempCycle = DesireSpeed * SPEED_TO_CYCLE(DesireSpeed) / LinearSpeed;
+			setIntCycle(TempCycle);
+		}
+
 		blink = true;
+		DesireSpeed = OldSpeed;
 	}
 
 	if (messageBuffer == "M323")
