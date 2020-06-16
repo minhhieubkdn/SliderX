@@ -13,11 +13,12 @@
 
 #define COMMAND_PORT Serial
 
-#define DEFAULT_ACCELERATION 1000 // mm/s2
+#define DEFAULT_ACCELERATION 900 // mm/s2
 
-#define MAX_SPEED 81 // mm/s
+#define MAX_SPEED 85 // mm/s
 #define DEFAULT_SPEED 30
 #define HOMING_SPEED 20
+#define BEGIN_SPEED 30
 
 #define MAX_POSITION 300
 
@@ -29,6 +30,7 @@
 
 String inputString;
 bool stringComplete;
+
 float DesireSpeed;
 float OldSpeed;
 float LinearSpeed;
@@ -40,7 +42,6 @@ long PassedSteps;
 unsigned long PassedTime;
 long AccelSteps;
 float TempCycle;
-unsigned long CycleOffset;
 
 bool isEnding = false;
 bool isHoming = false;
@@ -61,7 +62,6 @@ void loop()
 {
 	Home();
 	SerialExecute();
-	CaculateTempCycle();
 	SliderExecute();
 	LedBlink();
 }
@@ -160,7 +160,7 @@ void SliderExecute()
 
 	isMoving = true;
 
-	if (DesirePosition - CurrentPosition > 0)
+	if (DesirePosition > CurrentPosition)
 	{
 		digitalWrite(DIR_PIN, 1);
 		DesireSteps = roundf((DesirePosition - CurrentPosition) * STEP_PER_MM);
@@ -170,7 +170,7 @@ void SliderExecute()
 		digitalWrite(DIR_PIN, 0);
 		DesireSteps = roundf((CurrentPosition - DesirePosition) * STEP_PER_MM);
 	}
-
+	CaculateLinearSpeed();
 	FinishMoving();
 	TempCycle = SPEED_TO_CYCLE(LinearSpeed);
 	setIntCycle(TempCycle);
@@ -213,7 +213,7 @@ ISR(TIMER1_COMPA_vect)
 
 		PassedSteps++;
 		PassedTime += TempCycle;
-		if (LinearSpeed < DesireSpeed)
+		if (LinearSpeed < DesireSpeed && !isEnding)
 			AccelSteps++;
 	}
 }
@@ -237,9 +237,9 @@ void FinishMoving()
 	}
 }
 
-void CaculateTempCycle()
+void CaculateLinearSpeed()
 {
-	if (DesireSteps - PassedSteps < AccelSteps)
+	if (DesireSteps - PassedSteps <= AccelSteps)
 	{
 		if (!isEnding) 
 		{
@@ -253,7 +253,7 @@ void CaculateTempCycle()
 
 	if (LinearSpeed < DesireSpeed)
 	{
-		LinearSpeed = DesireSpeed / 5 + Accel * PassedTime / 1000000;
+		LinearSpeed = BEGIN_SPEED + Accel * PassedTime / 1000000;
 	}
 	else
 	{
@@ -310,16 +310,21 @@ void SerialExecute()
 			LinearSpeed = DesireSpeed / 5;
 			TempCycle = DesireSpeed * SPEED_TO_CYCLE(DesireSpeed) / LinearSpeed;
 			setIntCycle(TempCycle);
+			blink = true;
+			DesireSpeed = OldSpeed;
 		}
-
-		blink = true;
-		DesireSpeed = OldSpeed;
 	}
 
 	if (messageBuffer == "M323")
 	{
 		digitalWrite(EN_PIN, 1);
 		TurnOffTimer1;
+		COMMAND_PORT.println("Ok");
+	}
+
+	if (messageBuffer == "M324")
+	{
+		Accel = inputString.substring(5).toFloat();
 		COMMAND_PORT.println("Ok");
 	}
 
