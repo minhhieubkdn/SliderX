@@ -22,7 +22,7 @@
 
 #define MAX_POSITION 300
 
-#define STEP_PER_MM 120
+#define STEP_PER_MM 240
 
 #define SPEED_TO_CYCLE(x) (1000000.0 / (STEP_PER_MM * x))
 
@@ -68,6 +68,7 @@ void loop()
 
 void IOInit()
 {
+	pinMode(ENDSTOP_PIN, INPUT_PULLUP);
 	pinMode(DIR_PIN, OUTPUT);
 	pinMode(STEP_PIN, OUTPUT);
 	pinMode(EN_PIN, OUTPUT);
@@ -123,6 +124,7 @@ void Home()
 		TurnOffTimer1;
 		isHoming = false;
 		isMoving = false;
+		blink = false;
 		DesirePosition = 0;
 		CurrentPosition = 0;
 		DesireSteps = 0;
@@ -284,7 +286,7 @@ void SerialExecute()
 	if (messageBuffer == "M320")
 	{
 		isHoming = true;
-		//isMoving = true;
+		blink = true;
 		DesireSpeed = HOMING_SPEED;
 		DesirePosition = -1000;
 	}
