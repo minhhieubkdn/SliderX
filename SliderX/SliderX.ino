@@ -27,7 +27,7 @@
 
 #define SPEED_TO_CYCLE(x) (1000000.0 / (STEP_PER_MM * x))
 
-#include "ScurveInterpolator.h"
+#include <Arduino.h>
 
 String inputString;
 bool stringComplete;
@@ -51,7 +51,6 @@ bool isMoving = false;
 bool isLedOn = false;
 
 const uint8_t mask[] = {0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80};
-Scurve_Interpolator scurveAccel;
 
 void setup()
 {
@@ -89,8 +88,6 @@ void setValue()
 	CurrentPosition = 0;
 	DesireSteps = 0;
 	PassedSteps = 0;
-
-	scurveAccel.setMoveData(Accel, Jerk, DesireSpeed, BEGIN_SPEED, BEGIN_SPEED);
 }
 
 void TimerInit()
