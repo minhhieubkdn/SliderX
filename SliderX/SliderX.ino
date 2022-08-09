@@ -13,20 +13,21 @@
 
 #define COMMAND_PORT Serial
 
+#define DEFAULT_JERK 1200000	 // mm/s3
 #define DEFAULT_ACCELERATION 900 // mm/s2
 
-#define MAX_SPEED 85 // mm/s
 #define DEFAULT_SPEED 30
+#define MAX_SPEED 1000 // mm/s
 #define HOMING_SPEED 20
-#define BEGIN_SPEED 30
+#define BEGIN_SPEED 5
 
-#define MAX_POSITION 300
+#define MAX_POSITION 600l
 
-#define STEP_PER_MM 240
+#define STEP_PER_MM 200 // pul/rev = 1000, vitme = 1605; 1000 / 5 = 200 pul/mm
 
 #define SPEED_TO_CYCLE(x) (1000000.0 / (STEP_PER_MM * x))
 
-#include "MultiThread.h"
+#include "ScurveInterpolator.h"
 
 String inputString;
 bool stringComplete;
@@ -34,6 +35,7 @@ bool stringComplete;
 float DesireSpeed;
 float OldSpeed;
 float LinearSpeed;
+float Jerk;
 float Accel;
 float DesirePosition;
 float CurrentPosition;
@@ -46,9 +48,10 @@ float TempCycle;
 bool isEnding = false;
 bool isHoming = false;
 bool isMoving = false;
-bool blink = false;
+bool isLedOn = false;
 
-MultiThread LedBlinkScheduler;
+const uint8_t mask[] = {0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80};
+Scurve_Interpolator scurveAccel;
 
 void setup()
 {
@@ -63,7 +66,6 @@ void loop()
 	Home();
 	SerialExecute();
 	SliderExecute();
-	LedBlink();
 }
 
 void IOInit()
@@ -73,19 +75,22 @@ void IOInit()
 	pinMode(STEP_PIN, OUTPUT);
 	pinMode(EN_PIN, OUTPUT);
 	pinMode(LED_BUILTIN, OUTPUT);
-	digitalWrite(EN_PIN, 1);
+	digitalWrite(EN_PIN, 0);
 }
 
 void setValue()
 {
-	COMMAND_PORT.println("Begin:");
+	COMMAND_PORT.println("SliderX begin!");
 	DesireSpeed = OldSpeed = DEFAULT_SPEED;
 	Accel = DEFAULT_ACCELERATION;
+	Jerk = DEFAULT_JERK;
 
 	DesirePosition = 0;
 	CurrentPosition = 0;
 	DesireSteps = 0;
 	PassedSteps = 0;
+
+	scurveAccel.setMoveData(Accel, Jerk, DesireSpeed, BEGIN_SPEED, BEGIN_SPEED);
 }
 
 void TimerInit()
@@ -99,22 +104,10 @@ void TimerInit()
 	TCCR1B |= (1 << WGM12);
 	// Set prescaler 1 to Timer 1
 	TCCR1B |= (1 << CS10);
-	//Normal port operation, OCxA disconnected
+	// Normal port operation, OCxA disconnected
 	TCCR1A &= ~((1 << COM1A1) | (1 << COM1A0) | (1 << COM1B1) | (1 << COM1B0));
 
 	interrupts();
-}
-
-void LedBlink()
-{
-	if (!blink)
-	{
-		digitalWrite(LED_BUILTIN, 0);
-		return;
-	}
-
-	RUN_EVERY(LedBlinkScheduler, COMPARE_VALUE_TIMER / 16);
-	digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
 }
 
 void Home()
@@ -124,13 +117,11 @@ void Home()
 		TurnOffTimer1;
 		isHoming = false;
 		isMoving = false;
-		blink = false;
 		DesirePosition = 0;
 		CurrentPosition = 0;
 		DesireSteps = 0;
 		PassedSteps = 0;
 		AccelSteps = 0;
-		digitalWrite(EN_PIN, 0);
 		COMMAND_PORT.println("Ok");
 	}
 }
@@ -138,50 +129,20 @@ void Home()
 void SliderExecute()
 {
 
-	//speed
-	if (DesireSpeed < 0.01 && DesireSpeed > -0.01)
-	{
-		DesireSpeed = 0;
-	}
-
-	if (DesireSpeed != 0)
-	{
-		DesireSpeed = abs(DesireSpeed);
-	}
-
-	if (DesireSpeed > MAX_SPEED)
-	{
-		DesireSpeed = MAX_SPEED;
-	}
-
-	//position
-	if (DesirePosition > MAX_POSITION) DesirePosition = MAX_POSITION;
-
 	if (DesirePosition == CurrentPosition)
 		return;
 
 	isMoving = true;
+	DesireSteps = roundf(abs(DesirePosition - CurrentPosition) * STEP_PER_MM);
 
-	if (DesirePosition > CurrentPosition)
-	{
-		digitalWrite(DIR_PIN, 1);
-		DesireSteps = roundf((DesirePosition - CurrentPosition) * STEP_PER_MM);
-	}
-	else
-	{
-		digitalWrite(DIR_PIN, 0);
-		DesireSteps = roundf((CurrentPosition - DesirePosition) * STEP_PER_MM);
-	}
 	CaculateLinearSpeed();
 	FinishMoving();
 	TempCycle = SPEED_TO_CYCLE(LinearSpeed);
 	setIntCycle(TempCycle);
-
-	digitalWrite(EN_PIN, 0);
 	TurnOnTimer1;
 }
 
-//intCycle us
+// intCycle us
 void setIntCycle(float intCycle)
 {
 	int prescaler;
@@ -200,23 +161,30 @@ void setIntCycle(float intCycle)
 	}
 
 	COMPARE_VALUE_TIMER = roundf(intCycle * 16 / prescaler) - 1;
-	//COMPARE_VALUE_TIMER = roundf(intCycle * F_CPU / (1000000.0 * prescaler)) - 1;
+	// COMPARE_VALUE_TIMER = roundf(intCycle * F_CPU / (1000000.0 * prescaler)) - 1;
 }
 
 ISR(TIMER1_COMPA_vect)
 {
 	if (isMoving)
 	{
-		if (PassedSteps == DesireSteps) return;
+		if (PassedSteps == DesireSteps)
+			return;
 
-		digitalWrite(STEP_PIN, 0);
+		fastDigitalWrite(STEP_PIN, 0);
 		delayMicroseconds(3);
-		digitalWrite(STEP_PIN, 1);
+		fastDigitalWrite(STEP_PIN, 1);
 
 		PassedSteps++;
 		PassedTime += TempCycle;
 		if (LinearSpeed < DesireSpeed && !isEnding)
 			AccelSteps++;
+
+		if (PassedSteps % 8 == 0)
+		{
+			isLedOn = !isLedOn;
+			fastDigitalWrite(LED_BUILTIN, isLedOn);
+		}
 	}
 }
 
@@ -233,7 +201,6 @@ void FinishMoving()
 		AccelSteps = 0;
 		isMoving = false;
 		isEnding = false;
-		blink = false;
 		TurnOffTimer1;
 		COMMAND_PORT.println("Ok");
 	}
@@ -243,17 +210,17 @@ void CaculateLinearSpeed()
 {
 	if (DesireSteps - PassedSteps <= AccelSteps)
 	{
-		if (!isEnding) 
+		if (!isEnding)
 		{
 			isEnding = true;
 			PassedTime = 0;
-			if (DesireSpeed > LinearSpeed) DesireSpeed = LinearSpeed;
+			if (DesireSpeed > LinearSpeed)
+				DesireSpeed = LinearSpeed;
 		}
 		LinearSpeed = DesireSpeed - Accel * PassedTime / 1000000;
 		return;
 	}
-
-	if (LinearSpeed < DesireSpeed)
+	else if (LinearSpeed < DesireSpeed)
 	{
 		LinearSpeed = BEGIN_SPEED + Accel * PassedTime / 1000000;
 	}
@@ -274,19 +241,40 @@ void SerialExecute()
 			stringComplete = true;
 			break;
 		}
-
-		inputString += inChar;
+		if (inChar != '\r')
+			inputString += inChar;
 	}
 
 	if (!stringComplete)
 		return;
+
+	if (inputString == "IsSliderX")
+	{
+		COMMAND_PORT.println("YesSliderX");
+		inputString = "";
+		stringComplete = false;
+		return;
+	}
+	else if (inputString == "Position")
+	{
+		COMMAND_PORT.println(CurrentPosition);
+		inputString = "";
+		stringComplete = false;
+		return;
+	}
+	else if (inputString == "HTs")
+	{
+		COMMAND_PORT.println(digitalRead(ENDSTOP_PIN));
+		inputString = "";
+		stringComplete = false;
+		return;
+	}
 
 	String messageBuffer = inputString.substring(0, 4);
 
 	if (messageBuffer == "M320")
 	{
 		isHoming = true;
-		blink = true;
 		DesireSpeed = HOMING_SPEED;
 		DesirePosition = -1000;
 	}
@@ -294,6 +282,22 @@ void SerialExecute()
 	if (messageBuffer == "M321")
 	{
 		DesireSpeed = inputString.substring(5).toFloat();
+		// speed
+		if (DesireSpeed < 0.01 && DesireSpeed > -0.01)
+		{
+			DesireSpeed = 0;
+		}
+
+		if (DesireSpeed != 0)
+		{
+			DesireSpeed = abs(DesireSpeed);
+		}
+
+		if (DesireSpeed > MAX_SPEED)
+		{
+			DesireSpeed = MAX_SPEED;
+		}
+
 		OldSpeed = DesireSpeed;
 		COMMAND_PORT.println("Ok");
 	}
@@ -302,18 +306,29 @@ void SerialExecute()
 	{
 		DesirePosition = inputString.substring(5).toFloat();
 
-		if (DesirePosition < 0) DesirePosition = 0;
+		if (DesirePosition < 0)
+			DesirePosition = 0;
+		if (DesirePosition > MAX_POSITION)
+			DesirePosition = MAX_POSITION;
 		if (DesirePosition == CurrentPosition)
 		{
 			COMMAND_PORT.println("Ok");
 		}
 		else
 		{
-			LinearSpeed = DesireSpeed / 5;
+			LinearSpeed = BEGIN_SPEED;
 			TempCycle = DesireSpeed * SPEED_TO_CYCLE(DesireSpeed) / LinearSpeed;
 			setIntCycle(TempCycle);
-			blink = true;
 			DesireSpeed = OldSpeed;
+
+			if (DesirePosition > CurrentPosition)
+			{
+				fastDigitalWrite(DIR_PIN, 1);
+			}
+			else
+			{
+				fastDigitalWrite(DIR_PIN, 0);
+			}
 		}
 	}
 
@@ -332,4 +347,23 @@ void SerialExecute()
 
 	inputString = "";
 	stringComplete = false;
+}
+
+void fastDigitalWrite(uint8_t pin, uint8_t state)
+{
+
+	if (pin < 8)
+	{
+		state ? PORTD |= mask[pin] : PORTD &= ~mask[pin];
+	}
+	else if (pin < 14)
+	{
+		pin -= 8;
+		state ? PORTB |= mask[pin] : PORTB &= ~mask[pin];
+	}
+	else if (pin < 22)
+	{
+		pin -= 14;
+		state ? PORTC |= mask[pin] : PORTC &= ~mask[pin];
+	}
 }
