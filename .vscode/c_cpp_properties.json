@@ -8,8 +8,8 @@
         {
             "name": "PlatformIO",
             "includePath": [
-                "f:/PlatformIO/SliderX/include",
-                "f:/PlatformIO/SliderX/src",
+                "f:/DriveSync/Firmware/SliderX/include",
+                "f:/DriveSync/Firmware/SliderX/src",
                 "C:/Users/win/.platformio/packages/framework-arduino-avr/cores/arduino",
                 "C:/Users/win/.platformio/packages/framework-arduino-avr/variants/eightanaloginputs",
                 "C:/Users/win/.platformio/packages/framework-arduino-avr/libraries/EEPROM/src",
@@ -22,8 +22,8 @@
             "browse": {
                 "limitSymbolsToIncludedHeaders": true,
                 "path": [
-                    "f:/PlatformIO/SliderX/include",
-                    "f:/PlatformIO/SliderX/src",
+                    "f:/DriveSync/Firmware/SliderX/include",
+                    "f:/DriveSync/Firmware/SliderX/src",
                     "C:/Users/win/.platformio/packages/framework-arduino-avr/cores/arduino",
                     "C:/Users/win/.platformio/packages/framework-arduino-avr/variants/eightanaloginputs",
                     "C:/Users/win/.platformio/packages/framework-arduino-avr/libraries/EEPROM/src",
