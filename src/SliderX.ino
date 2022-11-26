@@ -31,7 +31,7 @@
 #define ACCEL_EXECUTE_PERIOD 0.001 // second
 
 #include <Arduino.h>
-#include <Scurve.h>
+#include <ScurveInterpolator.h>
 
 String inputString;
 bool stringComplete;
@@ -48,9 +48,10 @@ float current_segment_pos;
 
 bool is_homing = false;
 bool is_enable_pulse_timer = false;
+bool is_executing_M322 = false;
 
 volatile bool led = false;
-volatile unsigned long pulse_counter = 0;
+volatile unsigned long last_millis = 0;
 
 volatile uint8_t timer2_loop_num = 1;
 volatile uint8_t timer2_loop_index = 1;
@@ -212,7 +213,6 @@ void isr_accel_execute()
 {
 	is_enable_pulse_timer = false;
 	pause_pulse_timer;
-
 	if (scurve.update())
 	{
 		is_enable_pulse_timer = true;
@@ -255,7 +255,7 @@ void isr_generate_pulse()
 		pause_pulse_timer;
 		pause_accel_timer;
 		COMMAND_PORT.println("Ok");
-		COMMAND_PORT.println(current_steps);
+		is_executing_M322 = false;
 		current_position = desired_position;
 	}
 }
@@ -266,6 +266,7 @@ void init_homing()
 	int homing_period = SPEED_TO_PERIOD(HOMING_SPEED);
 	set_pulse_timer_period(homing_period);
 
+	is_homing = true;
 	is_enable_pulse_timer = true;
 	resume_pulse_timer;
 }
@@ -274,6 +275,7 @@ void handle_slider_events()
 {
 	if (is_homing)
 	{
+		blink_led();
 		if (!digitalRead(ENDSTOP_PIN))
 		{
 			is_enable_pulse_timer = false;
@@ -284,8 +286,19 @@ void handle_slider_events()
 			COMMAND_PORT.println("OkHoming");
 		}
 	}
-	else
+	else if (is_executing_M322)
 	{
+		blink_led();
+	}
+}
+
+void blink_led()
+{
+	if (millis() - last_millis > 100)
+	{
+		last_millis = millis();
+		led = !led;
+		fast_digital_write(LED_BUILTIN, led);
 	}
 }
 
@@ -360,20 +373,24 @@ void handle_serial_data()
 	}
 	else if (messageBuffer == "M322")
 	{
-		desired_position = inputString.substring(5).toFloat();
+		if (!is_executing_M322)
+		{
+			desired_position = inputString.substring(5).toFloat();
 
-		if (desired_position < 0)
-			desired_position = 0;
-		else if (desired_position > MAX_POSITION)
-			desired_position = MAX_POSITION;
-		else if (desired_position == current_position)
-		{
-			COMMAND_PORT.println("Ok");
-		}
-		else
-		{
-			float distance = desired_position - current_position;
-			init_new_segment(distance);
+			if (desired_position < 0)
+				desired_position = 0;
+			else if (desired_position > MAX_POSITION)
+				desired_position = MAX_POSITION;
+			else if (desired_position == current_position)
+			{
+				COMMAND_PORT.println("Ok");
+			}
+			else
+			{
+				float distance = desired_position - current_position;
+				init_new_segment(distance);
+				is_executing_M322 = true;
+			}
 		}
 	}
 	else if (messageBuffer == "M323")
