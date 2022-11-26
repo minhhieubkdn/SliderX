@@ -6,68 +6,73 @@
 
 #define LED_PIN 13
 
-#define COMPARE_VALUE_TIMER OCR1A
+#define resume_accel_timer (TIMSK2 |= (1 << OCIE2A))
+#define pause_accel_timer (TIMSK2 &= ~(1 << OCIE2A))
 
-#define TurnOnTimer1 (TIMSK1 |= (1 << OCIE1A))
-#define TurnOffTimer1 (TIMSK1 &= ~(1 << OCIE1A))
+#define resume_pulse_timer (TIMSK1 |= (1 << OCIE1A))
+#define pause_pulse_timer (TIMSK1 &= ~(1 << OCIE1A))
 
 #define COMMAND_PORT Serial
 
-#define DEFAULT_JERK 1200000	 // mm/s3
+#define DEFAULT_JERK 800000		 // mm/s3
 #define DEFAULT_ACCELERATION 900 // mm/s2
 
-#define DEFAULT_SPEED 30
+#define DEFAULT_SPEED 50
 #define MAX_SPEED 1000 // mm/s
 #define HOMING_SPEED 20
 #define BEGIN_SPEED 5
 
-#define MAX_POSITION 600l
+#define MAX_POSITION 500
 
-#define STEP_PER_MM 200 // pul/rev = 1000, vitme = 1605; 1000 / 5 = 200 pul/mm
+#define DEFAULT_STEP_PER_MM 200 // pul/rev = 1000, vitme = 1605; 1000 / 5 = 200 pul/mm
+#define SPEED_TO_PERIOD(x) (1000000.0 / (DEFAULT_STEP_PER_MM * x))
+#define PERIOD_TO_SPEED(x) (1000000.0 / (DEFAULT_STEP_PER_MM * x))
 
-#define SPEED_TO_CYCLE(x) (1000000.0 / (STEP_PER_MM * x))
+#define ACCEL_EXECUTE_PERIOD 0.001 // second
 
 #include <Arduino.h>
+#include <Scurve.h>
 
 String inputString;
 bool stringComplete;
 
-float DesireSpeed;
-float OldSpeed;
-float LinearSpeed;
-float Jerk;
-float Accel;
-float DesirePosition;
-float CurrentPosition;
-long DesireSteps;
-long PassedSteps;
-unsigned long PassedTime;
-long AccelSteps;
-float TempCycle;
+float desired_speed;
+float old_speed;
+float jerk;
+float accel;
+float desired_position;
+float current_position;
+long total_desired_steps;
+long current_steps;
+float current_segment_pos;
 
-bool isEnding = false;
-bool isHoming = false;
-bool isMoving = false;
-bool isLedOn = false;
+bool is_homing = false;
+bool is_enable_pulse_timer = false;
 
+volatile bool led = false;
+volatile unsigned long pulse_counter = 0;
+
+volatile uint8_t timer2_loop_num = 1;
+volatile uint8_t timer2_loop_index = 1;
+volatile int last_period;
 const uint8_t mask[] = {0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80};
+Scurve_Interpolator scurve;
 
 void setup()
 {
 	COMMAND_PORT.begin(115200);
-	IOInit();
-	setValue();
-	TimerInit();
+	initIO();
+	initValues();
+	initTimers();
 }
 
 void loop()
 {
-	Home();
-	SerialExecute();
-	SliderExecute();
+	handle_serial_data();
+	handle_slider_events();
 }
 
-void IOInit()
+void initIO()
 {
 	pinMode(ENDSTOP_PIN, INPUT_PULLUP);
 	pinMode(DIR_PIN, OUTPUT);
@@ -77,74 +82,75 @@ void IOInit()
 	digitalWrite(EN_PIN, 0);
 }
 
-void setValue()
+void initValues()
 {
 	COMMAND_PORT.println("SliderX begin!");
-	DesireSpeed = OldSpeed = DEFAULT_SPEED;
-	Accel = DEFAULT_ACCELERATION;
-	Jerk = DEFAULT_JERK;
+	desired_speed = old_speed = DEFAULT_SPEED;
+	accel = DEFAULT_ACCELERATION;
+	jerk = DEFAULT_JERK;
 
-	DesirePosition = 0;
-	CurrentPosition = 0;
-	DesireSteps = 0;
-	PassedSteps = 0;
+	scurve.setMoveData(accel, jerk, desired_speed, BEGIN_SPEED, BEGIN_SPEED);
+	scurve.setTimeTick(ACCEL_EXECUTE_PERIOD);
+
+	desired_position = 0;
+	current_position = 0;
+	total_desired_steps = 0;
+	current_steps = 0;
 }
 
-void TimerInit()
+void initTimers()
 {
 	noInterrupts();
 
-	// Reset register relate to Timer 1
-	// Reset register relate
 	TCCR1A = TCCR1B = TCNT1 = 0;
-	// Set CTC mode to Timer 1
 	TCCR1B |= (1 << WGM12);
-	// Set prescaler 1 to Timer 1
 	TCCR1B |= (1 << CS10);
-	// Normal port operation, OCxA disconnected
 	TCCR1A &= ~((1 << COM1A1) | (1 << COM1A0) | (1 << COM1B1) | (1 << COM1B0));
 
+	TCCR2A = TCCR2B = TCNT2 = 0;
+	TCCR2A |= (1 << WGM21);
+	TCCR2B |= (1 << CS20);
+
 	interrupts();
+
+	set_accel_timer_period(ACCEL_EXECUTE_PERIOD * 1000000);
 }
 
-void Home()
+// _period us
+void set_accel_timer_period(int _period)
 {
-	if (isHoming && !digitalRead(ENDSTOP_PIN))
+	int prescaler;
+	if (_period < 16)
 	{
-		TurnOffTimer1;
-		isHoming = false;
-		isMoving = false;
-		DesirePosition = 0;
-		CurrentPosition = 0;
-		DesireSteps = 0;
-		PassedSteps = 0;
-		AccelSteps = 0;
-		COMMAND_PORT.println("Ok");
+		TCCR2B |= (1 << CS20);
+		TCCR2B &= ~(1 << CS22);
+		prescaler = 1;
+		timer2_loop_num = 1;
+		OCR2A = roundf(_period * 16 / prescaler - 1);
+	}
+	else if (_period < 1020)
+	{
+		TCCR2B |= (1 << CS22);
+		TCCR2B &= ~(1 << CS20);
+		prescaler = 64;
+		timer2_loop_num = 1;
+		OCR2A = roundf(_period * 16 / prescaler - 1);
+	}
+	else
+	{
+		TCCR2B |= (1 << CS22);
+		TCCR2B &= ~(1 << CS20);
+		prescaler = 64;
+		timer2_loop_num = _period / 1000 + 1;
+		OCR2A = roundf((_period / timer2_loop_num) * 16 / prescaler - 1);
 	}
 }
 
-void SliderExecute()
-{
-
-	if (DesirePosition == CurrentPosition)
-		return;
-
-	isMoving = true;
-	DesireSteps = roundf(abs(DesirePosition - CurrentPosition) * STEP_PER_MM);
-
-	CaculateLinearSpeed();
-	FinishMoving();
-	TempCycle = SPEED_TO_CYCLE(LinearSpeed);
-	setIntCycle(TempCycle);
-	TurnOnTimer1;
-}
-
-// intCycle us
-void setIntCycle(float intCycle)
+void set_pulse_timer_period(int _period)
 {
 	int prescaler;
 
-	if (intCycle > 4000)
+	if (_period > 4000)
 	{
 		TCCR1B |= (1 << CS11);
 		TCCR1B &= ~(1 << CS10);
@@ -157,77 +163,133 @@ void setIntCycle(float intCycle)
 		prescaler = 1;
 	}
 
-	COMPARE_VALUE_TIMER = roundf(intCycle * 16 / prescaler) - 1;
-	// COMPARE_VALUE_TIMER = roundf(intCycle * F_CPU / (1000000.0 * prescaler)) - 1;
+	OCR1A = roundf(_period * 16 / prescaler) - 1;
+	// COMPARE_VALUE_TIMER = roundf(_period * F_CPU / (1000000.0 * prescaler)) - 1;
+}
+
+void init_new_segment(float distance)
+{
+	if (distance > 0)
+	{
+		fast_digital_write(DIR_PIN, 1);
+	}
+	else
+	{
+		fast_digital_write(DIR_PIN, 0);
+	}
+
+	current_steps = 0;
+	current_segment_pos = 0;
+	total_desired_steps = abs(distance) * DEFAULT_STEP_PER_MM;
+
+	scurve.setTarget(abs(distance));
+	scurve.start();
+
+	resume_accel_timer;
+	is_enable_pulse_timer = true;
 }
 
 ISR(TIMER1_COMPA_vect)
 {
-	if (isMoving)
-	{
-		if (PassedSteps == DesireSteps)
-			return;
-
-		fastDigitalWrite(STEP_PIN, 0);
-		delayMicroseconds(3);
-		fastDigitalWrite(STEP_PIN, 1);
-
-		PassedSteps++;
-		PassedTime += TempCycle;
-		if (LinearSpeed < DesireSpeed && !isEnding)
-			AccelSteps++;
-
-		if (PassedSteps % 8 == 0)
-		{
-			isLedOn = !isLedOn;
-			fastDigitalWrite(LED_BUILTIN, isLedOn);
-		}
-	}
+	isr_generate_pulse();
 }
 
-void FinishMoving()
+ISR(TIMER2_COMPA_vect)
 {
-	if (isMoving && PassedSteps == DesireSteps)
+	if (timer2_loop_index == timer2_loop_num)
 	{
-		CurrentPosition = DesirePosition;
-		AccelSteps = 0;
-		PassedTime = 0;
-		LinearSpeed = 0;
-		DesireSteps = 0;
-		PassedSteps = 0;
-		AccelSteps = 0;
-		isMoving = false;
-		isEnding = false;
-		TurnOffTimer1;
-		COMMAND_PORT.println("Ok");
-	}
-}
-
-void CaculateLinearSpeed()
-{
-	if (DesireSteps - PassedSteps <= AccelSteps)
-	{
-		if (!isEnding)
-		{
-			isEnding = true;
-			PassedTime = 0;
-			if (DesireSpeed > LinearSpeed)
-				DesireSpeed = LinearSpeed;
-		}
-		LinearSpeed = DesireSpeed - Accel * PassedTime / 1000000;
-		return;
-	}
-	else if (LinearSpeed < DesireSpeed)
-	{
-		LinearSpeed = BEGIN_SPEED + Accel * PassedTime / 1000000;
+		timer2_loop_index = 1;
+		//
+		isr_accel_execute();
 	}
 	else
 	{
-		LinearSpeed = DesireSpeed;
+		timer2_loop_index++;
 	}
 }
 
-void SerialExecute()
+void isr_accel_execute()
+{
+	is_enable_pulse_timer = false;
+	pause_pulse_timer;
+
+	if (scurve.update())
+	{
+		is_enable_pulse_timer = true;
+		resume_pulse_timer;
+	}
+	else
+	{
+		float linear_step_num = (scurve.p - current_segment_pos) * DEFAULT_STEP_PER_MM;
+		current_segment_pos = scurve.p;
+
+		float linear_period = 1000000 * ACCEL_EXECUTE_PERIOD / linear_step_num;
+		int int_period = roundf(linear_period);
+		if (last_period != int_period)
+		{
+			set_pulse_timer_period(int_period);
+			last_period = int_period;
+		}
+
+		is_enable_pulse_timer = true;
+		resume_pulse_timer;
+	}
+}
+
+void isr_generate_pulse()
+{
+	if (!is_enable_pulse_timer)
+		return;
+
+	fast_digital_write(STEP_PIN, 1);
+	delayMicroseconds(5);
+	fast_digital_write(STEP_PIN, 0);
+
+	if (is_homing)
+		return;
+
+	current_steps++;
+	if (current_steps >= total_desired_steps)
+	{
+		is_enable_pulse_timer = false;
+		pause_pulse_timer;
+		pause_accel_timer;
+		COMMAND_PORT.println("Ok");
+		COMMAND_PORT.println(current_steps);
+		current_position = desired_position;
+	}
+}
+
+void init_homing()
+{
+	fast_digital_write(DIR_PIN, 0);
+	int homing_period = SPEED_TO_PERIOD(HOMING_SPEED);
+	set_pulse_timer_period(homing_period);
+
+	is_enable_pulse_timer = true;
+	resume_pulse_timer;
+}
+
+void handle_slider_events()
+{
+	if (is_homing)
+	{
+		if (!digitalRead(ENDSTOP_PIN))
+		{
+			is_enable_pulse_timer = false;
+			pause_pulse_timer;
+			is_homing = false;
+			current_position = 0;
+			current_steps = 0;
+			COMMAND_PORT.println("OkHoming");
+		}
+	}
+	else
+	{
+	}
+}
+
+void handle_serial_data()
 {
 	while (COMMAND_PORT.available())
 	{
@@ -254,7 +316,7 @@ void SerialExecute()
 	}
 	else if (inputString == "Position")
 	{
-		COMMAND_PORT.println(CurrentPosition);
+		COMMAND_PORT.println(current_position);
 		inputString = "";
 		stringComplete = false;
 		return;
@@ -271,75 +333,72 @@ void SerialExecute()
 
 	if (messageBuffer == "M320")
 	{
-		isHoming = true;
-		DesireSpeed = HOMING_SPEED;
-		DesirePosition = -1000;
-		fastDigitalWrite(DIR_PIN, 0);
+		init_homing();
 	}
-
 	else if (messageBuffer == "M321")
 	{
-		DesireSpeed = inputString.substring(5).toFloat();
+		desired_speed = inputString.substring(5).toFloat();
 		// speed
-		if (DesireSpeed < 0.01 && DesireSpeed > -0.01)
+		if (desired_speed < 0.01 && desired_speed > -0.01)
 		{
-			DesireSpeed = 0;
+			desired_speed = 0;
 		}
 
-		if (DesireSpeed != 0)
+		if (desired_speed != 0)
 		{
-			DesireSpeed = abs(DesireSpeed);
+			desired_speed = abs(desired_speed);
+			scurve.setMaxVel(desired_speed);
 		}
 
-		if (DesireSpeed > MAX_SPEED)
+		if (desired_speed > MAX_SPEED)
 		{
-			DesireSpeed = MAX_SPEED;
+			desired_speed = MAX_SPEED;
 		}
 
-		OldSpeed = DesireSpeed;
+		old_speed = desired_speed;
 		COMMAND_PORT.println("Ok");
 	}
-
 	else if (messageBuffer == "M322")
 	{
-		DesirePosition = inputString.substring(5).toFloat();
+		desired_position = inputString.substring(5).toFloat();
 
-		if (DesirePosition < 0)
-			DesirePosition = 0;
-		if (DesirePosition > MAX_POSITION)
-			DesirePosition = MAX_POSITION;
-		if (DesirePosition == CurrentPosition)
+		if (desired_position < 0)
+			desired_position = 0;
+		else if (desired_position > MAX_POSITION)
+			desired_position = MAX_POSITION;
+		else if (desired_position == current_position)
 		{
 			COMMAND_PORT.println("Ok");
 		}
 		else
 		{
-			LinearSpeed = BEGIN_SPEED;
-			TempCycle = DesireSpeed * SPEED_TO_CYCLE(DesireSpeed) / LinearSpeed;
-			setIntCycle(TempCycle);
-			DesireSpeed = OldSpeed;
-
-			if (DesirePosition > CurrentPosition)
-			{
-				fastDigitalWrite(DIR_PIN, 1);
-			}
-			else
-			{
-				fastDigitalWrite(DIR_PIN, 0);
-			}
+			float distance = desired_position - current_position;
+			init_new_segment(distance);
 		}
 	}
-
-	else if (messageBuffer == "M324")
-	{
-		digitalWrite(EN_PIN, 1);
-		TurnOffTimer1;
-		COMMAND_PORT.println("Ok");
-	}
-
 	else if (messageBuffer == "M323")
 	{
-		Accel = inputString.substring(5).toFloat();
+		digitalWrite(EN_PIN, 1);
+		pause_accel_timer;
+		COMMAND_PORT.println("Ok");
+	}
+	else if (messageBuffer == "M324")
+	{
+		accel = inputString.substring(5).toFloat();
+		scurve.setMaxAcc(accel);
+		COMMAND_PORT.println("Ok");
+	}
+	else if (messageBuffer == "M325")
+	{
+		jerk = inputString.substring(5).toFloat();
+		scurve.setMaxJerk(jerk);
+		COMMAND_PORT.println("Ok");
+	}
+	else if (messageBuffer == "M326")
+	{
+		float ve = inputString.substring(5).toFloat();
+		scurve.setVelStart(ve);
+		scurve.setVelEnd(ve);
 		COMMAND_PORT.println("Ok");
 	}
 
@@ -347,7 +406,7 @@ void SerialExecute()
 	stringComplete = false;
 }
 
-void fastDigitalWrite(uint8_t pin, uint8_t state)
+void fast_digital_write(uint8_t pin, uint8_t state)
 {
 
 	if (pin < 8)
